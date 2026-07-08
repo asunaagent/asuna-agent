@@ -19,13 +19,14 @@ class Pool {
       uptime: Date.now(), totalHashrate: 0, blocksFound: 0,
       sharesTotal: 0, sharesAccepted: 0, sharesRejected: 0,
       shareDuplicateReject: 0, shareLowDiffReject: 0,
+      // per-port tracking
+      sharesByPort: { easy: 0, medium: 0, hard: 0 },
     };
     this.lastBlockHash = null;
     this.currentJobId = 0;
     this.lastJobHash = '';
     this.dashboardHtml = null;
-    // FIX: duplicate share tracking
-    this.recentShares = new Map();  // hash -> timestamp
+    this.recentShares = new Map();
     this.shareCleanupInterval = setInterval(() => {
       const cutoff = Date.now() - 60000;
       for (const [h, t] of this.recentShares) {
@@ -35,8 +36,9 @@ class Pool {
   }
 
   async start() {
-    console.log('\n=== PRL Mining Pool v2.1.0 ===');
-    console.log('=== Security: rate-limit + vardiff + share-validation ===\n');
+    console.log('\n=== PRL Mining Pool v2.2.0 ===');
+    console.log('=== 3-Port Stratum: Easy/Medium/Hard ===');
+    console.log('=== Vardiff + Share-Validation + Rate-Limit ===\n');
     try {
       const info = await this.rpc.getBlockchainInfo();
       this.networkInfo.height = info.blocks;
@@ -54,52 +56,60 @@ class Pool {
     this._startJobPoller();
     this._startHashrateUpdater();
 
-    // FIX: DB integrity check every 5 min
+    // DB integrity check every 5 min
     setInterval(() => {
       const issues = this.db.integrityCheck();
       if (issues > 0) console.log('[Pool] DB integrity fixed: ' + issues + ' issues');
     }, 300000);
 
-    console.log('[Pool] Stratum: 0.0.0.0:' + config.stratum.port);
+    const ports = config.stratum.ports;
+    console.log('\n[Pool] Stratum ports:');
+    console.log(`  Easy   :${ports.easy.port}  (diff ${ports.easy.difficulty})  — CPU / low hashrate`);
+    console.log(`  Medium :${ports.medium.port} (diff ${ports.medium.difficulty}) — mid GPU`);
+    console.log(`  Hard   :${ports.hard.port}  (diff ${ports.hard.difficulty}) — high-end / MI300X`);
     console.log('[Pool] Dashboard: http://0.0.0.0:' + config.api.port);
     console.log('[Pool] Wallet: ' + config.pool.wallet.substring(0, 20) + '...');
-    console.log('[Pool] Fee: ' + (config.pool.fee * 100) + '%');
-    console.log('[Pool] Vardiff: ' + config.vardiff.minDifficulty + '-' + config.vardiff.maxDifficulty + '\n');
+    console.log('[Pool] Fee: ' + (config.pool.fee * 100) + '%\n');
   }
 
   _setupHandlers() {
     this.stratum.on('authorize', (client) => {
       this.db.getMiner(client.address);
-      this.db.updateMiner(client.address, { connected_at: Date.now(), worker_name: client.worker || 'default' });
-      console.log('[Pool] Miner joined: ' + client.address.substring(0, 20));
+      this.db.updateMiner(client.address, {
+        connected_at: Date.now(),
+        worker_name: client.worker || 'default',
+        port: client.port,
+        port_name: client.portName,
+      });
+      console.log('[Pool] Miner joined: ' + client.address.substring(0, 20) + ' on :${client.port} (' + client.portName + ')');
       this._fetchAndBroadcast(true);
       setTimeout(() => this._sendJobToClient(client), 500);
     });
 
     this.stratum.on('share', (share, cb) => {
       this.poolStats.sharesTotal++;
+      if (share.portName && this.poolStats.sharesByPort[share.portName] !== undefined) {
+        this.poolStats.sharesByPort[share.portName]++;
+      }
       this._validateShare(share, cb);
     });
 
     this.stratum.on('disconnect', (client) => {
-      if (client.address) console.log('[Pool] Miner left: ' + client.address.substring(0, 20));
+      if (client.address) console.log('[Pool] Miner left: ' + client.address.substring(0, 20) + ' from :${client.port}');
     });
   }
 
-  // FIX: proper share validation
   _validateShare(share, cb) {
-    const { address, worker, jobId, extranonce2, ntime, nonce, difficulty } = share;
+    const { address, worker, jobId, extranonce2, ntime, nonce, difficulty, portName } = share;
 
-    // 1. Basic field validation
     if (!address || !jobId || !ntime || !nonce) {
       this.poolStats.sharesRejected++;
       this.poolStats.shareLowDiffReject++;
-      console.log('[Share] REJECT missing fields from ' + address.substring(0, 16));
+      console.log('[Share] REJECT missing fields from ' + address.substring(0, 16) + ' (:${portName || "?"})');
       cb(false, 'Invalid share data');
       return;
     }
 
-    // 2. Job existence check
     const job = this.stratum.currentJob;
     if (!job || job.jobId !== jobId) {
       this.poolStats.sharesRejected++;
@@ -108,7 +118,6 @@ class Pool {
       return;
     }
 
-    // 3. Duplicate share check
     const shareHash = crypto.createHash('sha256')
       .update(address + ':' + jobId + ':' + (extranonce2 || '') + ':' + ntime + ':' + nonce)
       .digest('hex');
@@ -121,7 +130,6 @@ class Pool {
     }
     this.recentShares.set(shareHash, Date.now());
 
-    // 4. NTime validation (not too old, not in future)
     const now = Math.floor(Date.now() / 1000);
     const shareTime = parseInt(ntime, 16);
     if (isNaN(shareTime) || shareTime < now - 600 || shareTime > now + 60) {
@@ -131,7 +139,6 @@ class Pool {
       return;
     }
 
-    // 5. Nonce format validation
     if (!/^[0-9a-fA-F]+$/.test(nonce) || nonce.length < 1 || nonce.length > 16) {
       this.poolStats.sharesRejected++;
       console.log('[Share] REJECT bad nonce from ' + address.substring(0, 16));
@@ -139,8 +146,7 @@ class Pool {
       return;
     }
 
-    // 6. Check against minimum pool difficulty
-    const minDiff = this.networkInfo.difficulty * 0.001;  // 0.1% of network diff
+    const minDiff = this.networkInfo.difficulty * 0.0001;  // 0.01% of network diff
     if (difficulty < minDiff) {
       this.poolStats.sharesRejected++;
       this.poolStats.shareLowDiffReject++;
@@ -149,7 +155,6 @@ class Pool {
       return;
     }
 
-    // 7. Submit accepted share
     this.poolStats.sharesAccepted++;
     this.db.addShare(address, difficulty || 64, 1);
     const m = this.db.getMiner(address);
@@ -158,8 +163,9 @@ class Pool {
       shares_accepted: m.shares_accepted + 1,
       last_share_time: Date.now(),
       difficulty: difficulty,
+      port: portName || m.port || 'unknown',
     });
-    console.log('[Share] ACCEPT ' + address.substring(0, 16) + '... diff=' + (difficulty || 64));
+    console.log('[Share] ACCEPT ' + address.substring(0, 16) + '... diff=' + (difficulty || 64) + ' port=' + (portName || '?'));
     cb(true);
   }
 
@@ -174,7 +180,7 @@ class Pool {
                  job.merkleBranches, job.version, job.nBits, job.nTime, true],
       });
       client.socket.write(msg + '\n');
-      console.log('[Job] Sent to ' + client.address.substring(0, 16));
+      console.log('[Job] Sent to ' + client.address.substring(0, 16) + ' on :${client.port}');
     } catch (e) {}
   }
 
@@ -196,6 +202,7 @@ class Pool {
         version: (tmpl.version || 2).toString(16).padStart(8, '0'),
         nBits: tmpl.bits || '1a022929',
         nTime: Math.floor(Date.now() / 1000).toString(16),
+        msg: null,  // will be set by broadcastJob
       };
 
       this.networkInfo.height = tmpl.height || this.networkInfo.height;
@@ -245,10 +252,8 @@ class Pool {
       let total = 0;
       const now = Date.now();
       for (const m of miners) {
-        // FIX: proper hashrate calc using windowed average
         const elapsed = Math.max((now - (m.connected_at || now)) / 1000, 1);
         const recentShares = m.shares_accepted || 0;
-        // Use last 10 min window for hashrate
         const windowSec = Math.min(elapsed, 600);
         const hr = (recentShares * (m.difficulty || 64) * 65536) / (windowSec * 1000000);  // MH/s
         this.db.updateMiner(m.address, { hashrate: Math.round(hr * 100) / 100 });
@@ -263,16 +268,29 @@ class Pool {
       const parsed = require('url').parse(req.url, true);
       const p = parsed.pathname;
       res.setHeader('Access-Control-Allow-Origin', '*');
+
       if (p === '/api/stats') {
+        const portStats = this.stratum.getPortStats();
         this._json(res, {
           pool: {
-            name: 'PRL Mining Pool', version: '2.1.0',
+            name: 'PRL Mining Pool', version: '2.2.0',
             uptime: Date.now() - this.poolStats.uptime,
             hashrate: this.poolStats.totalHashrate,
             miners: this.stratum.getClientCount(),
             blocksFound: this.db.getPoolStats().totalBlocks,
             fee: (config.pool.fee * 100).toFixed(1) + '%',
-            shares: { accepted: this.poolStats.sharesAccepted, rejected: this.poolStats.sharesRejected, duplicate: this.poolStats.shareDuplicateReject, lowDiff: this.poolStats.shareLowDiffReject },
+            shares: {
+              accepted: this.poolStats.sharesAccepted,
+              rejected: this.poolStats.sharesRejected,
+              duplicate: this.poolStats.shareDuplicateReject,
+              lowDiff: this.poolStats.shareLowDiffReject,
+              byPort: this.poolStats.sharesByPort,
+            },
+            stratum: {
+              easy: { port: config.stratum.ports.easy.port, difficulty: config.stratum.ports.easy.difficulty, connections: portStats.easy?.conn || 0, shares: portStats.easy?.shares || 0 },
+              medium: { port: config.stratum.ports.medium.port, difficulty: config.stratum.ports.medium.difficulty, connections: portStats.medium?.conn || 0, shares: portStats.medium?.shares || 0 },
+              hard: { port: config.stratum.ports.hard.port, difficulty: config.stratum.ports.hard.difficulty, connections: portStats.hard?.conn || 0, shares: portStats.hard?.shares || 0 },
+            },
           },
           network: this.networkInfo,
         });
@@ -286,6 +304,12 @@ class Pool {
         this._json(res, this.db.getPayouts());
       } else if (p === '/api/connections') {
         this._json(res, this.stratum.getAllClients());
+      } else if (p === '/api/ports') {
+        this._json(res, {
+          easy: { port: config.stratum.ports.easy.port, difficulty: config.stratum.ports.easy.difficulty, label: 'CPU / low hashrate' },
+          medium: { port: config.stratum.ports.medium.port, difficulty: config.stratum.ports.medium.difficulty, label: 'Mid GPU' },
+          hard: { port: config.stratum.ports.hard.port, difficulty: config.stratum.ports.hard.difficulty, label: 'High-end / MI300X' },
+        });
       } else if (p === '/api/vardiff') {
         this._json(res, {
           min: config.vardiff.minDifficulty,

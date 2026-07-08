@@ -3,13 +3,32 @@
 const path = require('path');
 
 const config = {
+  // FIX: 3 stratum ports (easy/medium/hard)
   stratum: {
     host: process.env.POOL_HOST || '0.0.0.0',
-    port: parseInt(process.env.POOL_PORT || '3333'),
-    maxConnections: parseInt(process.env.MAX_CONN || '500'),  // FIX: connection limit
-    perIPLimit: parseInt(process.env.PER_IP_LIMIT || '5'),     // FIX: per-IP limit
-    maxMessageSize: parseInt(process.env.MAX_MSG || '2048'),    // FIX: max msg size
-    pingInterval: parseInt(process.env.PING_INTERVAL || '30000'), // FIX: keepalive
+    ports: {
+      easy: {
+        port: parseInt(process.env.STRATUM_EASY || '3333'),
+        difficulty: parseInt(process.env.DIFF_EASY || '32'),
+        maxConnections: parseInt(process.env.MAX_CONN_EASY || '300'),
+        label: 'Low difficulty',
+      },
+      medium: {
+        port: parseInt(process.env.STRATUM_MEDIUM || '4444'),
+        difficulty: parseInt(process.env.DIFF_MEDIUM || '128'),
+        maxConnections: parseInt(process.env.MAX_CONN_MEDIUM || '200'),
+        label: 'Medium difficulty',
+      },
+      hard: {
+        port: parseInt(process.env.STRATUM_HARD || '5555'),
+        difficulty: parseInt(process.env.DIFF_HARD || '512'),
+        maxConnections: parseInt(process.env.MAX_CONN_HARD || '100'),
+        label: 'High difficulty',
+      },
+    },
+    perIPLimit: parseInt(process.env.PER_IP_LIMIT || '10'),
+    maxMessageSize: parseInt(process.env.MAX_MSG || '2048'),
+    pingInterval: parseInt(process.env.PING_INTERVAL || '30000'),
   },
   api: {
     host: process.env.API_HOST || '0.0.0.0',
@@ -29,12 +48,12 @@ const config = {
     minPayout: 100000000,
     payoutInterval: 3600,
   },
-  vardiff: {                          // FIX: adaptive difficulty
-    minDifficulty: 16,
-    maxDifficulty: 2048,
-    targetShareTime: 15,              // seconds between shares
-    retargetInterval: 60,             // seconds between retargets
-    variancePercent: 0.3,             // 30% tolerance
+  vardiff: {
+    minDifficulty: parseInt(process.env.VARDIFF_MIN || '16'),
+    maxDifficulty: parseInt(process.env.VARDIFF_MAX || '2048'),
+    targetShareTime: parseInt(process.env.VARDIFF_TARGET || '15'),
+    retargetInterval: parseInt(process.env.VARDIFF_INTERVAL || '60'),
+    variancePercent: 0.3,
   },
   pplns: {
     windowSize: 120,
